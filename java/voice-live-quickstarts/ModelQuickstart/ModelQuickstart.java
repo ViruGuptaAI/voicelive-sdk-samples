@@ -14,6 +14,8 @@ import com.azure.ai.voicelive.models.ClientEventSessionUpdate;
 import com.azure.ai.voicelive.models.InputAudioFormat;
 import com.azure.ai.voicelive.models.InteractionModality;
 import com.azure.ai.voicelive.models.AzureStandardVoice;
+import com.azure.ai.voicelive.models.OpenAIVoice;
+import com.azure.ai.voicelive.models.OpenAIVoiceName;
 import com.azure.ai.voicelive.models.OutputAudioFormat;
 import com.azure.ai.voicelive.models.ServerEventType;
 import com.azure.ai.voicelive.models.ServerVadTurnDetection;
@@ -39,6 +41,8 @@ import javax.sound.sampled.TargetDataLine;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Properties;
 import java.util.concurrent.BlockingQueue;
@@ -96,6 +100,7 @@ public final class ModelQuickstart {
     private static final String DEFAULT_API_VERSION = "2025-10-01";
     private static final String DEFAULT_MODEL = "gpt-realtime";
     private static final String DEFAULT_VOICE = "en-US-Ava:DragonHDLatestNeural";
+    private static final String DEFAULT_INSTRUCTIONS_FILE = "instructions.txt";
     private static final String DEFAULT_INSTRUCTIONS = "You are a helpful AI voice assistant. Respond naturally and conversationally. Keep your responses concise but engaging. Speak as if having a real conversation.";
 
     // Environment variable names
@@ -375,7 +380,12 @@ public final class ModelQuickstart {
                 config.apiKey = props.getProperty("azure.voicelive.api-key");
                 config.model = props.getProperty("azure.voicelive.model", DEFAULT_MODEL);
                 config.voice = props.getProperty("azure.voicelive.voice", DEFAULT_VOICE);
-                config.instructions = props.getProperty("azure.voicelive.instructions", DEFAULT_INSTRUCTIONS);
+                // Load instructions from file if specified in properties, otherwise use default
+                String instructionsFile = props.getProperty("azure.voicelive.instructions.file", DEFAULT_INSTRUCTIONS_FILE);
+                config.instructions = loadInstructions(instructionsFile);
+            } else {
+                // Load instructions from default file if properties file doesn't exist
+                config.instructions = loadInstructions(DEFAULT_INSTRUCTIONS_FILE);
             }
             
             // 2. Override with environment variables if present
@@ -435,6 +445,26 @@ public final class ModelQuickstart {
         } catch (IOException e) {
             // File not found or cannot be read - this is OK, will use env vars
             return null;
+        }
+    }
+
+    /**
+     * Load instructions from a text file.
+     * 
+     * @param filename The name of the instructions file
+     * @return The instructions as a string, or the default instructions if file cannot be read
+     */
+    private static String loadInstructions(String filename) {
+        try {
+            String instructions = new String(Files.readAllBytes(Paths.get(filename)));
+            System.out.println("✓ Loaded instructions from " + filename);
+            System.out.println("📝 Instructions length: " + instructions.length() + " characters");
+            System.out.println("📝 First 100 chars: " + instructions.substring(0, Math.min(100, instructions.length())));
+            return instructions.trim();
+        } catch (IOException e) {
+            System.out.println("⚠️ Could not load " + filename + ", using default instructions");
+            System.out.println("⚠️ Error: " + e.getMessage());
+            return DEFAULT_INSTRUCTIONS;
         }
     }
 
@@ -702,8 +732,11 @@ public final class ModelQuickstart {
 
         VoiceLiveSessionOptions options = new VoiceLiveSessionOptions()
             .setInstructions(config.instructions)
-            // Voice: AzureStandardVoice for Azure TTS voices (e.g., en-US-Ava:DragonHDLatestNeural)
-            .setVoice(BinaryData.fromObject(new AzureStandardVoice(config.voice)))
+            // Voice: Use OpenAIVoice for simple names (alloy, echo, shimmer, marin, etc.)
+            //        or AzureStandardVoice for Azure TTS (e.g., en-US-Ava:DragonHDLatestNeural)
+            .setVoice(isOpenAIVoice(config.voice) 
+                ? BinaryData.fromObject(new OpenAIVoice(getOpenAIVoiceName(config.voice)))
+                : BinaryData.fromObject(new AzureStandardVoice(config.voice)))
             .setModalities(Arrays.asList(InteractionModality.TEXT, InteractionModality.AUDIO))
             .setInputAudioFormat(InputAudioFormat.PCM16)
             .setOutputAudioFormat(OutputAudioFormat.PCM16)
@@ -716,6 +749,22 @@ public final class ModelQuickstart {
 
         System.out.println("✓ Session configuration created");
         return options;
+    }
+
+    /**
+     * Determine if voice name is an OpenAI voice (simple name) or Azure voice (contains colon or hyphen pattern)
+     */
+    private static boolean isOpenAIVoice(String voiceName) {
+        // OpenAI voices: alloy, echo, fable, onyx, nova, shimmer, marin, etc.
+        // Azure voices: contain ":" or match pattern like "en-US-Ava:DragonHDLatestNeural"
+        return !voiceName.contains(":");
+    }
+
+    /**
+     * Convert voice name string to OpenAIVoiceName enum
+     */
+    private static OpenAIVoiceName getOpenAIVoiceName(String voiceName) {
+        return OpenAIVoiceName.fromString(voiceName);
     }
 
     /**

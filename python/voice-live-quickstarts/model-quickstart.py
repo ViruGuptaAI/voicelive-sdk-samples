@@ -30,8 +30,11 @@ from azure.ai.voicelive.models import (
     ServerEventType,
     ServerVad
 )
+
 from dotenv import load_dotenv
 import pyaudio
+
+import system_instructions
 
 if TYPE_CHECKING:
     # Only needed for type checking; avoids runtime import issues
@@ -311,10 +314,13 @@ class BasicVoiceAssistant:
             voice_config = self.voice
 
         # Create turn detection configuration
+        # This configures Server-side Voice Activity Detection (VAD) to automatically detect when the user starts and stops speakin
         turn_detection_config = ServerVad(
-            threshold=0.5,
+            threshold=0.5,  ## between 0 to 1, lower means more sensitive, quickly reacts with smaller noices
             prefix_padding_ms=300,
-            silence_duration_ms=500)
+            silence_duration_ms=500 ##  Waits 500ms of silence before considering speech "stopped
+            )
+        ## Typical flow --->  VAD detects speech start → captures audio → detects 500ms silence → triggers INPUT_AUDIO_BUFFER_SPEECH_STOPPED event → assistant processes and responds.
 
         # Create session configuration
         session_config = RequestSession(
@@ -327,6 +333,7 @@ class BasicVoiceAssistant:
             input_audio_echo_cancellation=AudioEchoCancellation(),
             input_audio_noise_reduction=AudioNoiseReduction(type="azure_deep_noise_suppression"),
         )
+        ### Both Echo Cancellation and Noise Suppression are Server side and enabled to enhance audio quality by minimizing feedback and background noise, hence clear audio for speech recognition.
 
         conn = self.connection
         assert conn is not None, "Connection must be established before setting up session"
@@ -352,10 +359,18 @@ class BasicVoiceAssistant:
         conn = self.connection
         assert ap is not None, "AudioProcessor must be initialized"
         assert conn is not None, "Connection must be established"
+        # assert keyword is used for debugging purposes to ensure that certain conditions are met or it will log the error.
 
         if event.type == ServerEventType.SESSION_UPDATED:
             logger.info("Session ready: %s", event.session.id)
             self.session_ready = True
+
+            # Add this for proactive greeting:
+            if not hasattr(self, 'conversation_started') or not self.conversation_started:
+                self.conversation_started = True
+                await asyncio.sleep(0.3) ## pause before starting initial conversation
+                print("Agent initiated conversation...")
+                await conn.response.create()
 
             # Start audio capture once session is ready
             ap.start_capture()
@@ -449,16 +464,45 @@ def parse_arguments():
         default=os.environ.get("AZURE_VOICELIVE_VOICE", "en-US-Ava:DragonHDLatestNeural"),
     )
 
+    # Option 1 :- Fetching system messages from .env file
+
+    # parser.add_argument(
+    #     "--instructions",
+    #     help="System instructions for the AI assistant",
+    #     type=str,
+    #     default=os.environ.get(
+    #         "AZURE_VOICELIVE_INSTRUCTIONS",
+    #         "You are a helpful AI assistant. Respond naturally and conversationally. "
+    #         "Keep your responses concise but engaging.",
+    #     ),
+    # )
+
+    # Option 2 :- Fetching system messages from system_instructions.py file
+
     parser.add_argument(
-        "--instructions",
-        help="System instructions for the AI assistant",
-        type=str,
-        default=os.environ.get(
-            "AZURE_VOICELIVE_INSTRUCTIONS",
-            "You are a helpful AI assistant. Respond naturally and conversationally. "
-            "Keep your responses concise but engaging.",
-        ),
+    "--instructions",
+    help="System instructions for the AI assistant",
+    type=str,
+    default=(
+        system_instructions.AZURE_VOICELIVE_INSTRUCTIONS.strip()
+        or "You are a helpful AI assistant. Respond naturally and conversationally. "
+           "Keep your responses concise but engaging."
+    ),
     )
+
+    # Option 3 :- Priority to system_instructions.py file, fallback to .env file
+
+    # parser.add_argument(
+    # "--instructions",
+    # help="System instructions for the AI assistant",
+    # type=str,
+    # default=(
+    #     system_instructions.AZURE_VOICELIVE_INSTRUCTIONS.strip() 
+    #     or os.environ.get("AZURE_VOICELIVE_INSTRUCTIONS")
+    #     or "You are a helpful AI assistant. Respond naturally and conversationally. "
+    #        "Keep your responses concise but engaging."
+    # ),
+    # )
 
     parser.add_argument(
         "--use-token-credential", help="Use Azure token credential instead of API key", action="store_true", default=False
