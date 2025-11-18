@@ -316,11 +316,11 @@ class BasicVoiceAssistant:
         # Create turn detection configuration
         # This configures Server-side Voice Activity Detection (VAD) to automatically detect when the user starts and stops speakin
         turn_detection_config = ServerVad(
-            threshold=0.5,  ## between 0 to 1, lower means more sensitive, quickly reacts with smaller noices
-            prefix_padding_ms=300,
-            silence_duration_ms=500 ##  Waits 500ms of silence before considering speech "stopped
+            threshold=0.8,  ## between 0 to 1, lower means more sensitive, quickly reacts with smaller noices
+            prefix_padding_ms=300,  ## milliseconds of user audio to include before speech start
+            silence_duration_ms=900 ##  Waits 900ms of silence before considering speech "stopped
             )
-        ## Typical flow --->  VAD detects speech start → captures audio → detects 500ms silence → triggers INPUT_AUDIO_BUFFER_SPEECH_STOPPED event → assistant processes and responds.
+        ## Typical flow --->  VAD detects speech start → captures audio → detects 900ms silence → triggers INPUT_AUDIO_BUFFER_SPEECH_STOPPED event → assistant processes and responds.
 
         # Create session configuration
         session_config = RequestSession(
@@ -368,7 +368,7 @@ class BasicVoiceAssistant:
             # Add this for proactive greeting:
             if not hasattr(self, 'conversation_started') or not self.conversation_started:
                 self.conversation_started = True
-                await asyncio.sleep(0.3) ## pause before starting initial conversation
+                await asyncio.sleep(2) ## pause before starting initial conversation
                 print("Agent initiated conversation...")
                 await conn.response.create()
 
@@ -480,13 +480,13 @@ def parse_arguments():
     # Option 2 :- Fetching system messages from system_instructions.py file
 
     parser.add_argument(
-    "--instructions",
-    help="System instructions for the AI assistant",
-    type=str,
-    default=(
-        system_instructions.AZURE_VOICELIVE_INSTRUCTIONS.strip()
-        or "You are a helpful AI assistant. Respond naturally and conversationally. "
-           "Keep your responses concise but engaging."
+        "--instructions",
+        help="System instructions for the AI assistant",
+        type=str,
+        default=(
+            system_instructions.AZURE_VOICELIVE_INSTRUCTIONS.strip()
+            or "You are a helpful AI assistant. Respond naturally and conversationally. "
+            "Keep your responses concise but engaging."
     ),
     )
 
