@@ -22,7 +22,9 @@ from azure.ai.voicelive.aio import connect
 from azure.ai.voicelive.models import (
     AudioEchoCancellation,
     AudioNoiseReduction,
+    AzureSemanticVad,
     AzureStandardVoice,
+    EouDetection,
     InputAudioFormat,
     Modality,
     OutputAudioFormat,
@@ -82,15 +84,15 @@ class AudioProcessor:
             self.seq_num = seq_num
             self.data = data
 
-    def __init__(self, connection):
+    def __init__(self, connection, sample_rate=24000):
         self.connection = connection
         self.audio = pyaudio.PyAudio()
 
-        # Audio configuration - PCM16, 24kHz, mono as specified
+        # Audio configuration - PCM16, mono as specified
         self.format = pyaudio.paInt16
         self.channels = 1
-        self.rate = 24000
-        self.chunk_size = 1200 # 50ms
+        self.rate = sample_rate
+        self.chunk_size = int(sample_rate * 0.05) # 50ms chunks
 
         # Capture and playback state
         self.input_stream = None
@@ -250,6 +252,23 @@ class BasicVoiceAssistant:
         model: str,
         voice: str,
         instructions: str,
+        voice_temperature: Optional[float] = None,
+        voice_rate: Optional[str] = None,
+        vad_type: str = "server_vad",
+        vad_threshold: float = 0.8,
+        vad_prefix_padding_ms: int = 300,
+        vad_silence_duration_ms: int = 900,
+        vad_speech_duration_ms: int = 80,
+        vad_remove_filler_words: bool = False,
+        vad_interrupt_response: bool = False,
+        end_of_utterance_enabled: bool = False,
+        end_of_utterance_model: str = "semantic_detection_v1",
+        end_of_utterance_threshold_level: str = "default",
+        end_of_utterance_timeout_ms: int = 1000,
+        audio_sample_rate: int = 24000,
+        noise_reduction_type: str = "azure_deep_noise_suppression",
+        echo_cancellation_enabled: bool = True,
+        greeting_delay: float = 2.0,
     ):
 
         self.endpoint = endpoint
@@ -257,6 +276,23 @@ class BasicVoiceAssistant:
         self.model = model
         self.voice = voice
         self.instructions = instructions
+        self.voice_temperature = voice_temperature
+        self.voice_rate = voice_rate
+        self.vad_type = vad_type
+        self.vad_threshold = vad_threshold
+        self.vad_prefix_padding_ms = vad_prefix_padding_ms
+        self.vad_silence_duration_ms = vad_silence_duration_ms
+        self.vad_speech_duration_ms = vad_speech_duration_ms
+        self.vad_remove_filler_words = vad_remove_filler_words
+        self.vad_interrupt_response = vad_interrupt_response
+        self.end_of_utterance_enabled = end_of_utterance_enabled
+        self.end_of_utterance_model = end_of_utterance_model
+        self.end_of_utterance_threshold_level = end_of_utterance_threshold_level
+        self.end_of_utterance_timeout_ms = end_of_utterance_timeout_ms
+        self.audio_sample_rate = audio_sample_rate
+        self.noise_reduction_type = noise_reduction_type
+        self.echo_cancellation_enabled = echo_cancellation_enabled
+        self.greeting_delay = greeting_delay
         self.connection: Optional["VoiceLiveConnection"] = None
         self.audio_processor: Optional[AudioProcessor] = None
         self.session_ready = False
@@ -278,7 +314,7 @@ class BasicVoiceAssistant:
                 self.connection = conn
 
                 # Initialize audio processor
-                ap = AudioProcessor(conn)
+                ap = AudioProcessor(conn, sample_rate=self.audio_sample_rate)
                 self.audio_processor = ap
 
                 # Configure session for voice conversation
@@ -307,20 +343,62 @@ class BasicVoiceAssistant:
         # Create voice configuration
         voice_config: Union[AzureStandardVoice, str]
         if self.voice.startswith("en-US-") or self.voice.startswith("en-CA-") or "-" in self.voice:
-            # Azure voice
-            voice_config = AzureStandardVoice(name=self.voice)
+            # Azure voice - create with optional temperature and rate
+            voice_kwargs = {"name": self.voice}
+            if self.voice_temperature is not None:
+                voice_kwargs["temperature"] = self.voice_temperature
+            if self.voice_rate is not None:
+                voice_kwargs["rate"] = self.voice_rate
+            voice_config = AzureStandardVoice(**voice_kwargs)
+            logger.info(f"Azure voice configured: {self.voice} (temp={self.voice_temperature}, rate={self.voice_rate})")
         else:
             # OpenAI voice (alloy, echo, fable, onyx, nova, shimmer)
             voice_config = self.voice
+            logger.info(f"OpenAI voice configured: {self.voice}")
 
-        # Create turn detection configuration
-        # This configures Server-side Voice Activity Detection (VAD) to automatically detect when the user starts and stops speakin
-        turn_detection_config = ServerVad(
-            threshold=0.8,  ## between 0 to 1, lower means more sensitive, quickly reacts with smaller noices
-            prefix_padding_ms=300,  ## milliseconds of user audio to include before speech start
-            silence_duration_ms=900 ##  Waits 900ms of silence before considering speech "stopped
+        # Create turn detection configuration based on VAD type
+        if self.vad_type == "azure_semantic_vad" or self.vad_type == "azure_multilingual_semantic_vad":
+            # Azure Semantic VAD with advanced features
+            vad_kwargs = {
+                "threshold": self.vad_threshold,
+                "prefix_padding_ms": self.vad_prefix_padding_ms,
+                "silence_duration_ms": self.vad_silence_duration_ms,
+                "speech_duration_ms": self.vad_speech_duration_ms,
+                "remove_filler_words": self.vad_remove_filler_words,
+                "interrupt_response": self.vad_interrupt_response,
+            }
+            
+            # Add end of utterance detection if enabled
+            if self.end_of_utterance_enabled:
+                vad_kwargs["end_of_utterance_detection"] = EouDetection(
+                    model=self.end_of_utterance_model,
+                    threshold_level=self.end_of_utterance_threshold_level,
+                    timeout_ms=self.end_of_utterance_timeout_ms,
+                )
+                logger.info(f"End-of-utterance detection enabled: {self.end_of_utterance_model}")
+            
+            turn_detection_config = AzureSemanticVad(**vad_kwargs)
+            logger.info(f"Using {self.vad_type} with threshold={self.vad_threshold}")
+        else:
+            # Standard Server VAD
+            turn_detection_config = ServerVad(
+                threshold=self.vad_threshold,
+                prefix_padding_ms=self.vad_prefix_padding_ms,
+                silence_duration_ms=self.vad_silence_duration_ms,
             )
-        ## Typical flow --->  VAD detects speech start → captures audio → detects 900ms silence → triggers INPUT_AUDIO_BUFFER_SPEECH_STOPPED event → assistant processes and responds.
+            logger.info(f"Using server_vad with threshold={self.vad_threshold}")
+
+        # Configure noise reduction
+        noise_reduction = None
+        if self.noise_reduction_type and self.noise_reduction_type != "none":
+            noise_reduction = AudioNoiseReduction(type=self.noise_reduction_type)
+            logger.info(f"Noise reduction enabled: {self.noise_reduction_type}")
+
+        # Configure echo cancellation
+        echo_cancellation = None
+        if self.echo_cancellation_enabled:
+            echo_cancellation = AudioEchoCancellation()
+            logger.info("Echo cancellation enabled")
 
         # Create session configuration
         session_config = RequestSession(
@@ -330,10 +408,9 @@ class BasicVoiceAssistant:
             input_audio_format=InputAudioFormat.PCM16,
             output_audio_format=OutputAudioFormat.PCM16,
             turn_detection=turn_detection_config,
-            input_audio_echo_cancellation=AudioEchoCancellation(),
-            input_audio_noise_reduction=AudioNoiseReduction(type="azure_deep_noise_suppression"),
+            input_audio_echo_cancellation=echo_cancellation,
+            input_audio_noise_reduction=noise_reduction,
         )
-        ### Both Echo Cancellation and Noise Suppression are Server side and enabled to enhance audio quality by minimizing feedback and background noise, hence clear audio for speech recognition.
 
         conn = self.connection
         assert conn is not None, "Connection must be established before setting up session"
@@ -368,7 +445,7 @@ class BasicVoiceAssistant:
             # Add this for proactive greeting:
             if not hasattr(self, 'conversation_started') or not self.conversation_started:
                 self.conversation_started = True
-                await asyncio.sleep(2) ## pause before starting initial conversation
+                await asyncio.sleep(self.greeting_delay)
                 print("Agent initiated conversation...")
                 await conn.response.create()
 
@@ -504,6 +581,152 @@ def parse_arguments():
     # ),
     # )
 
+    # ============================================
+    # Voice Configuration Parameters
+    # ============================================
+    parser.add_argument(
+        "--voice-temperature",
+        help="Voice temperature for HD voices (0.0-2.0, controls variability)",
+        type=float,
+        default=float(os.environ.get("AZURE_VOICELIVE_VOICE_TEMPERATURE", "0.8")) if os.environ.get("AZURE_VOICELIVE_VOICE_TEMPERATURE") else None,
+    )
+
+    parser.add_argument(
+        "--voice-rate",
+        help="Speaking rate (0.5-1.5, controls speed)",
+        type=str,
+        default=os.environ.get("AZURE_VOICELIVE_VOICE_RATE", "1.0") if os.environ.get("AZURE_VOICELIVE_VOICE_RATE") else None,
+    )
+
+    # ============================================
+    # Turn Detection (VAD) Configuration
+    # ============================================
+    parser.add_argument(
+        "--vad-type",
+        help="VAD type: server_vad, azure_semantic_vad, or azure_multilingual_semantic_vad",
+        type=str,
+        default=os.environ.get("AZURE_VOICELIVE_VAD_TYPE", "server_vad"),
+        choices=["server_vad", "azure_semantic_vad", "azure_multilingual_semantic_vad"],
+    )
+
+    parser.add_argument(
+        "--vad-threshold",
+        help="VAD threshold (0.0-1.0, higher = less sensitive)",
+        type=float,
+        default=float(os.environ.get("AZURE_VOICELIVE_VAD_THRESHOLD", "0.8")),
+    )
+
+    parser.add_argument(
+        "--vad-prefix-padding-ms",
+        help="Audio captured before speech start (milliseconds)",
+        type=int,
+        default=int(os.environ.get("AZURE_VOICELIVE_VAD_PREFIX_PADDING_MS", "300")),
+    )
+
+    parser.add_argument(
+        "--vad-silence-duration-ms",
+        help="Silence duration to detect speech end (milliseconds)",
+        type=int,
+        default=int(os.environ.get("AZURE_VOICELIVE_VAD_SILENCE_DURATION_MS", "900")),
+    )
+
+    parser.add_argument(
+        "--vad-speech-duration-ms",
+        help="Minimum speech duration to start detection (milliseconds)",
+        type=int,
+        default=int(os.environ.get("AZURE_VOICELIVE_VAD_SPEECH_DURATION_MS", "80")),
+    )
+
+    parser.add_argument(
+        "--vad-remove-filler-words",
+        help="Remove filler words like 'umm', 'ah'",
+        action="store_true",
+        default=os.environ.get("AZURE_VOICELIVE_VAD_REMOVE_FILLER_WORDS", "false").lower() == "true",
+    )
+
+    parser.add_argument(
+        "--vad-interrupt-response",
+        help="Enable barge-in interruption",
+        action="store_true",
+        default=os.environ.get("AZURE_VOICELIVE_VAD_INTERRUPT_RESPONSE", "false").lower() == "true",
+    )
+
+    # ============================================
+    # End of Utterance Detection
+    # ============================================
+    parser.add_argument(
+        "--end-of-utterance-enabled",
+        help="Enable advanced end-of-utterance detection",
+        action="store_true",
+        default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_ENABLED", "false").lower() == "true",
+    )
+
+    parser.add_argument(
+        "--end-of-utterance-model",
+        help="End-of-utterance model: semantic_detection_v1 or semantic_detection_v1_multilingual",
+        type=str,
+        default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_MODEL", "semantic_detection_v1"),
+        choices=["semantic_detection_v1", "semantic_detection_v1_multilingual"],
+    )
+
+    parser.add_argument(
+        "--end-of-utterance-threshold-level",
+        help="Threshold level: low, medium, high, or default",
+        type=str,
+        default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_THRESHOLD_LEVEL", "default"),
+        choices=["low", "medium", "high", "default"],
+    )
+
+    parser.add_argument(
+        "--end-of-utterance-timeout-ms",
+        help="Maximum wait time for detection (milliseconds)",
+        type=int,
+        default=int(os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_TIMEOUT_MS", "1000")),
+    )
+
+    # ============================================
+    # Audio Configuration
+    # ============================================
+    parser.add_argument(
+        "--audio-sample-rate",
+        help="Audio sample rate: 16000 or 24000",
+        type=int,
+        default=int(os.environ.get("AZURE_VOICELIVE_AUDIO_SAMPLE_RATE", "24000")),
+        choices=[16000, 24000],
+    )
+
+    parser.add_argument(
+        "--noise-reduction-type",
+        help="Noise reduction type: azure_deep_noise_suppression or none",
+        type=str,
+        default=os.environ.get("AZURE_VOICELIVE_NOISE_REDUCTION_TYPE", "azure_deep_noise_suppression"),
+        choices=["azure_deep_noise_suppression", "none"],
+    )
+
+    parser.add_argument(
+        "--echo-cancellation-enabled",
+        help="Enable echo cancellation",
+        action="store_true",
+        default=os.environ.get("AZURE_VOICELIVE_ECHO_CANCELLATION_ENABLED", "true").lower() == "true",
+    )
+
+    parser.add_argument(
+        "--no-echo-cancellation",
+        help="Disable echo cancellation",
+        action="store_true",
+        default=False,
+    )
+
+    # ============================================
+    # Additional Features
+    # ============================================
+    parser.add_argument(
+        "--greeting-delay",
+        help="Proactive greeting delay in seconds",
+        type=float,
+        default=float(os.environ.get("AZURE_VOICELIVE_GREETING_DELAY", "2.0")),
+    )
+
     parser.add_argument(
         "--use-token-credential", help="Use Azure token credential instead of API key", action="store_true", default=False
     )
@@ -537,6 +760,9 @@ def main():
         credential = AzureKeyCredential(args.api_key)
         logger.info("Using API key credential")
 
+    # Handle echo cancellation flag override
+    echo_cancellation_enabled = args.echo_cancellation_enabled and not args.no_echo_cancellation
+
     # Create and start voice assistant
     assistant = BasicVoiceAssistant(
         endpoint=args.endpoint,
@@ -544,6 +770,23 @@ def main():
         model=args.model,
         voice=args.voice,
         instructions=args.instructions,
+        voice_temperature=args.voice_temperature,
+        voice_rate=args.voice_rate,
+        vad_type=args.vad_type,
+        vad_threshold=args.vad_threshold,
+        vad_prefix_padding_ms=args.vad_prefix_padding_ms,
+        vad_silence_duration_ms=args.vad_silence_duration_ms,
+        vad_speech_duration_ms=args.vad_speech_duration_ms,
+        vad_remove_filler_words=args.vad_remove_filler_words,
+        vad_interrupt_response=args.vad_interrupt_response,
+        end_of_utterance_enabled=args.end_of_utterance_enabled,
+        end_of_utterance_model=args.end_of_utterance_model,
+        end_of_utterance_threshold_level=args.end_of_utterance_threshold_level,
+        end_of_utterance_timeout_ms=args.end_of_utterance_timeout_ms,
+        audio_sample_rate=args.audio_sample_rate,
+        noise_reduction_type=args.noise_reduction_type,
+        echo_cancellation_enabled=echo_cancellation_enabled,
+        greeting_delay=args.greeting_delay,
     )
 
     # Setup signal handlers for graceful shutdown
