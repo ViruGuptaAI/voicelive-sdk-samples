@@ -371,9 +371,7 @@ class BasicVoiceAssistant:
             # Add end of utterance detection if enabled
             if self.end_of_utterance_enabled:
                 vad_kwargs["end_of_utterance_detection"] = EouDetection(
-                    model=self.end_of_utterance_model,
-                    threshold_level=self.end_of_utterance_threshold_level,
-                    timeout_ms=self.end_of_utterance_timeout_ms,
+                    model=self.end_of_utterance_model
                 )
                 logger.info(f"End-of-utterance detection enabled: {self.end_of_utterance_model}")
             
@@ -443,11 +441,11 @@ class BasicVoiceAssistant:
             self.session_ready = True
 
             # Add this for proactive greeting:
-            if not hasattr(self, 'conversation_started') or not self.conversation_started:
-                self.conversation_started = True
-                await asyncio.sleep(self.greeting_delay)
-                print("Agent initiated conversation...")
-                await conn.response.create()
+            # if not hasattr(self, 'conversation_started') or not self.conversation_started:
+            #     self.conversation_started = True
+            await asyncio.sleep(self.greeting_delay)
+            print("Agent initiated conversation...")
+            await conn.response.create()
 
             # Start audio capture once session is ready
             ap.start_capture()

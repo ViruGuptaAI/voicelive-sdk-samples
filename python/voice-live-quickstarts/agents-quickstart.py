@@ -22,7 +22,9 @@ from azure.ai.voicelive.aio import connect
 from azure.ai.voicelive.models import (
     AudioEchoCancellation,
     AudioNoiseReduction,
+    AzureSemanticVad,
     AzureStandardVoice,
+    EouDetection,
     InputAudioFormat,
     Modality,
     OutputAudioFormat,
@@ -30,6 +32,7 @@ from azure.ai.voicelive.models import (
     ServerEventType,
     ServerVad
 )
+
 from dotenv import load_dotenv
 import pyaudio
 

@@ -18,6 +18,8 @@ from typing import Union, Optional, Dict, Any, Mapping, Callable, TYPE_CHECKING,
 from azure.core.credentials import AzureKeyCredential
 from azure.core.credentials_async import AsyncTokenCredential
 from azure.identity.aio import AzureCliCredential, DefaultAzureCredential
+from azure.ai.projects import AIProjectClient
+from azure.identity import DefaultAzureCredential as SyncDefaultAzureCredential
 
 from azure.ai.voicelive.aio import connect
 from azure.ai.voicelive.models import (
@@ -40,6 +42,8 @@ from azure.ai.voicelive.models import (
 from dotenv import load_dotenv
 import pyaudio
 
+import system_instructions
+
 if TYPE_CHECKING:
     from azure.ai.voicelive.aio import VoiceLiveConnection
 
@@ -48,6 +52,16 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # Environment variable loading
 load_dotenv('./.env', override=True)
+
+# Required environment variables:
+# - AZURE_VOICELIVE_API_KEY: API key for VoiceLive service
+# - AZURE_VOICELIVE_ENDPOINT: Endpoint URL for VoiceLive service
+# - AZURE_VOICELIVE_MODEL: Model name (e.g., gpt-realtime)
+# - AZURE_VOICELIVE_VOICE: Voice name (e.g., en-US-Ava:DragonHDLatestNeural)
+# - FOUNDRY_ENDPOINT: Azure AI Foundry endpoint for child agent (optional)
+# - FOUNDRY_API_KEY: API key for Azure AI Foundry (optional, uses DefaultAzureCredential if not provided)
+# - CHILD_AGENT_ID: Agent ID for customer information agent (optional)
+# Note: A new thread is automatically created for each session
 
 # Set up logging
 ## Add folder for logging
@@ -270,10 +284,44 @@ class AsyncFunctionCallingClient:
         self._response_api_done = False
         self._pending_function_call: Optional[Dict[str, Any]] = None
 
+        # Initialize Azure AI Project Client for child agent
+        foundry_endpoint = os.environ.get("FOUNDRY_ENDPOINT")
+        self.child_agent_id = os.environ.get("CHILD_AGENT_ID", "asst_xBlcCfPyv1v9yDV8VWmmiBWk")
+        self.child_thread_id = None  # Will create a new thread when needed
+        
+        if foundry_endpoint:
+            try:
+                # Strip any whitespace from endpoint
+                foundry_endpoint = foundry_endpoint.strip()
+                logger.info(f"Initializing Azure AI Project Client with endpoint: {foundry_endpoint[:50]}...")
+                
+                # Use DefaultAzureCredential (works with az login)
+                credential = SyncDefaultAzureCredential()
+                logger.info("Using DefaultAzureCredential for child agent")
+                
+                self.project_client = AIProjectClient(
+                    credential=credential,
+                    endpoint=foundry_endpoint,
+                )
+                # Create a new thread for this session
+                thread = self.project_client.agents.threads.create()
+                self.child_thread_id = thread.id
+                logger.info(f"Azure AI Project Client initialized with new thread: {self.child_thread_id}")
+                # print(f"✅ Child agent initialized - Thread: {self.child_thread_id}, Agent: {self.child_agent_id}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Azure AI Project Client: {e}")
+                print(f"❌ Failed to initialize child agent: {e}")
+                self.project_client = None
+        else:
+            logger.warning("FOUNDRY_ENDPOINT not set - child agent calls will use mock data")
+            print("⚠️ FOUNDRY_ENDPOINT not set")
+            self.project_client = None
+
         # Define available functions
         self.available_functions: Dict[str, Callable[[Union[str, Mapping[str, Any]]], Mapping[str, Any]]] = {
-            "get_current_time": self.get_current_time,
-            "get_current_weather": self.get_current_weather,
+            # "get_current_time": self.get_current_time,
+            # "get_current_weather": self.get_current_weather,
+            "get_customer_information": self.get_customer_information,
         }
 
     async def start(self):
@@ -303,9 +351,6 @@ class AsyncFunctionCallingClient:
                 logger.info("Voice assistant with function calling ready! Start speaking...")
                 print("\n" + "=" * 60)
                 print("🎤 VOICE ASSISTANT WITH FUNCTION CALLING READY")
-                print("Try saying:")
-                print("  • 'What's the current time?'")
-                print("  • 'What's the weather in Seattle?'")
                 print("Press Ctrl+C to exit")
                 print("=" * 60 + "\n")
 
@@ -367,6 +412,24 @@ class AsyncFunctionCallingClient:
                         },
                     },
                     "required": ["location"],
+                },
+            ),
+            FunctionTool(
+                name="get_customer_information",
+                description="Get customer information from the Customer Information Agent. Use this to fetch customer profile, loan eligibility, or credit card offers.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "customer_id": {
+                            "type": "string",
+                            "description": "The customer ID to fetch information for. Default is for Viru.",
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "What information to fetch. Examples: 'Get complete customer profile', 'What loans is this customer eligible for?', 'Show available credit card offers', 'Get loan interest rates and tenure options'",
+                        },
+                    },
+                    "required": ["query"],
                 },
             ),
         ]
@@ -583,6 +646,86 @@ class AsyncFunctionCallingClient:
         except Exception as e:
             logger.error(f"Error getting weather: {e}")
             return {"error": str(e)}
+        
+    def get_customer_information(self, arguments: Union[str, Mapping[str, Any]]) -> Dict[str, Any]:
+        """
+        Invokes the child agent to get customer information.
+        The child agent has access to all customer data and returns structured information.
+        """
+        if isinstance(arguments, str):
+            try:
+                args = json.loads(arguments)
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse customer information arguments: {arguments}")
+                return {"error": "Invalid arguments"}
+        else:
+            args = arguments if isinstance(arguments, dict) else {}
+
+        customer_id = args.get("customer_id", "viru")
+        query = args.get("query", "")
+
+        logger.info(f"Invoking child agent for customer_id: {customer_id}, query: {query}")
+        print(f"📞 Fetching info from child agent: {query}")
+
+        # Call the actual Azure AI Agent
+        if not self.project_client:
+            error_msg = "Project client not initialized. Check FOUNDRY_ENDPOINT and Azure credentials."
+            logger.error(error_msg)
+            print(f"❌ {error_msg}")
+            return {"error": error_msg}
+        
+        try:
+            logger.info(f"Using thread: {self.child_thread_id}, agent: {self.child_agent_id}")
+            
+            # Create a message in the thread with the query
+            message = self.project_client.agents.messages.create(
+                thread_id=self.child_thread_id,
+                role="user",
+                content=query
+            )
+            logger.info(f"Message created: {message.id}")
+
+            # Run the agent and process
+            logger.info("Running child agent...")
+            run = self.project_client.agents.runs.create_and_process(
+                thread_id=self.child_thread_id,
+                agent_id=self.child_agent_id
+            )
+            logger.info(f"Run completed with status: {run.status}")
+
+            if run.status == "failed":
+                error_msg = f"Agent run failed: {run.last_error}"
+                logger.error(error_msg)
+                print(f"❌ {error_msg}")
+                return {"error": error_msg}
+            
+            # Get the latest assistant message
+            messages = self.project_client.agents.messages.list(
+                thread_id=self.child_thread_id, 
+                order="desc"
+            )
+            
+            latest_assistant_text: Optional[str] = None
+            for msg in messages:
+                if msg.role == "assistant" and msg.text_messages:
+                    latest_assistant_text = msg.text_messages[-1].text.value
+                    break
+            
+            if latest_assistant_text:
+                logger.info(f"Child agent response received")
+                print(f"✅ Response: {latest_assistant_text[:100]}...")
+                return {"response": latest_assistant_text}
+            else:
+                error_msg = "No response from child agent"
+                logger.warning(error_msg)
+                print(f"⚠️ {error_msg}")
+                return {"error": error_msg}
+
+        except Exception as e:
+            error_msg = f"Error calling child agent: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            print(f"❌ {error_msg}")
+            return {"error": error_msg}
 
 
 def parse_arguments():
@@ -620,18 +763,29 @@ def parse_arguments():
         default=os.environ.get("AZURE_VOICELIVE_VOICE", "en-US-Ava:DragonHDLatestNeural"),
     )
 
+    # parser.add_argument(
+    #     "--instructions",
+    #     help="System instructions for the AI assistant",
+    #     type=str,
+    #     default=os.environ.get(
+    #         "AZURE_VOICELIVE_INSTRUCTIONS",
+    #         "You are a helpful AI assistant with access to functions. "
+    #         "Use the functions when appropriate to provide accurate, real-time information. "
+    #         "If you are asked about the weather, please respond with 'I will get the weather for you. Please wait a moment.' and then call the get_current_weather function. "
+    #         "If you are asked about the time, please respond with 'I will get the time for you. Please wait a moment.' and then call the get_current_time function. "
+    #         "Explain when you're using a function and include the results in your response naturally. Always start the conversation in English.",
+    #     ),
+    # )
+
     parser.add_argument(
         "--instructions",
         help="System instructions for the AI assistant",
         type=str,
-        default=os.environ.get(
-            "AZURE_VOICELIVE_INSTRUCTIONS",
-            "You are a helpful AI assistant with access to functions. "
-            "Use the functions when appropriate to provide accurate, real-time information. "
-            "If you are asked about the weather, please respond with 'I will get the weather for you. Please wait a moment.' and then call the get_current_weather function. "
-            "If you are asked about the time, please respond with 'I will get the time for you. Please wait a moment.' and then call the get_current_time function. "
-            "Explain when you're using a function and include the results in your response naturally. Always start the conversation in English.",
-        ),
+        default=(
+            system_instructions.Azure_Function_calling_instructions.strip()
+            or "You are a helpful AI assistant. Respond naturally and conversationally. "
+            "Keep your responses concise but engaging."
+    ),
     )
 
     parser.add_argument(
@@ -699,6 +853,7 @@ if __name__ == "__main__":
         "pyaudio": "Audio processing",
         "azure.ai.voicelive": "Azure VoiceLive SDK",
         "azure.core": "Azure Core libraries",
+        "azure.ai.projects": "Azure AI Projects SDK (for child agent)",
     }
 
     missing_deps = []
@@ -712,7 +867,7 @@ if __name__ == "__main__":
         print("❌ Missing required dependencies:")
         for dep in missing_deps:
             print(f"  - {dep}")
-        print("\nInstall with: pip install azure-ai-voicelive pyaudio python-dotenv")
+        print("\nInstall with: pip install azure-ai-voicelive azure-ai-projects pyaudio python-dotenv")
         sys.exit(1)
 
     # Check audio system
