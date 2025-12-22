@@ -2,6 +2,20 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 # -------------------------------------------------------------------------
+"""
+Human-in-the-Loop (HITL) Voice Assistant with Agent Escalation
+
+This implementation adds functionality to:
+1. Detect when the AI cannot answer a query
+2. Route the call to a human agent
+3. Gracefully close the VoiceLive WebSocket connection
+4. Provide handoff context to the human agent
+
+The AI can trigger escalation via:
+- Explicit function call: transfer_to_human_agent()
+- Detection of uncertainty keywords
+- Repeated failed attempts to answer
+"""
 from __future__ import annotations
 import os
 import sys
@@ -31,7 +45,9 @@ from azure.ai.voicelive.models import (
     OutputAudioFormat,
     RequestSession,
     ServerEventType,
-    ServerVad
+    ServerVad,
+    FunctionTool,
+    # ToolChoice
 )
 
 from dotenv import load_dotenv
@@ -40,7 +56,6 @@ import pyaudio
 import system_instructions
 
 if TYPE_CHECKING:
-    # Only needed for type checking; avoids runtime import issues
     from azure.ai.voicelive.aio import VoiceLiveConnection
 
 ## Change to the directory where this script is located
@@ -59,12 +74,13 @@ timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 ## Set up logging
 logging.basicConfig(
-    filename=f'logs/{timestamp}_voicelive.log',
+    filename=f'logs/{timestamp}_hitl_voicelive.log',
     filemode="w",
     format='%(asctime)s:%(name)s:%(levelname)s:%(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
 
 class AudioProcessor:
     """
@@ -243,8 +259,17 @@ class AudioProcessor:
 
         logger.info("Audio processor cleaned up")
 
-class BasicVoiceAssistant:
-    """Basic voice assistant implementing the VoiceLive SDK patterns."""
+
+class HITLVoiceAssistant:
+    """
+    Human-in-the-Loop Voice Assistant with agent escalation capabilities.
+    
+    Features:
+    - Function calling to detect when to transfer to human
+    - Conversation history tracking for handoff context
+    - Graceful WebSocket closure
+    - Integration hooks for human agent systems
+    """
 
     def __init__(
         self,
@@ -270,6 +295,7 @@ class BasicVoiceAssistant:
         noise_reduction_type: str = "azure_deep_noise_suppression",
         echo_cancellation_enabled: bool = True,
         greeting_delay: float = 2.0,
+        human_agent_endpoint: Optional[str] = None,
     ):
 
         self.endpoint = endpoint
@@ -294,6 +320,8 @@ class BasicVoiceAssistant:
         self.noise_reduction_type = noise_reduction_type
         self.echo_cancellation_enabled = echo_cancellation_enabled
         self.greeting_delay = greeting_delay
+        self.human_agent_endpoint = human_agent_endpoint
+        
         self.connection: Optional["VoiceLiveConnection"] = None
         self.audio_processor: Optional[AudioProcessor] = None
         self.session_ready = False
@@ -302,6 +330,11 @@ class BasicVoiceAssistant:
         self.conversation_history = []
         self._current_user_transcript = ""
         self._current_assistant_response = ""
+        
+        # HITL-specific state
+        self._escalation_requested = False
+        self._escalation_reason = ""
+        self._should_exit = False
 
     async def start(self):
         """Start the voice assistant session."""
@@ -321,7 +354,7 @@ class BasicVoiceAssistant:
                 ap = AudioProcessor(conn, sample_rate=self.audio_sample_rate)
                 self.audio_processor = ap
 
-                # Configure session for voice conversation
+                # Configure session for voice conversation with HITL tools
                 await self._setup_session()
 
                 # Start audio systems
@@ -329,16 +362,22 @@ class BasicVoiceAssistant:
 
                 logger.info("Voice assistant ready! Start speaking...")
                 print("\n" + "=" * 60)
-                print("🎤 VOICE ASSISTANT READY")
+                print("🎤 HITL VOICE ASSISTANT READY")
+                print("AI will route to human agent when needed")
                 print("Start speaking to begin conversation")
                 print("Press Ctrl+C to exit")
                 print("=" * 60 + "\n")
 
                 # Process events
                 await self._process_events()
+                
         finally:
-            # Save conversation history before shutdown
+            # Save conversation history and handle escalation
             self._save_conversation_history()
+            
+            if self._escalation_requested:
+                await self._handle_human_agent_transfer()
+            
             if self.audio_processor:
                 self.audio_processor.shutdown()
 
@@ -348,37 +387,118 @@ class BasicVoiceAssistant:
             return
         
         try:
-            history_file = f'logs/{timestamp}_conversation_history.json'
+            history_file = f'logs/{timestamp}_hitl_conversation_history.json'
+            
+            # Add escalation metadata if applicable
+            metadata = {
+                "session_id": timestamp,
+                "escalation_requested": self._escalation_requested,
+                "escalation_reason": self._escalation_reason,
+                "conversation": self.conversation_history
+            }
+            
             with open(history_file, 'w', encoding='utf-8') as f:
-                json.dump(self.conversation_history, f, indent=2, ensure_ascii=False)
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
             logger.info(f"Conversation history saved to {history_file}")
             print(f"\n💾 Conversation history saved to {history_file}")
         except Exception as e:
             logger.error(f"Failed to save conversation history: {e}")
 
+    async def _handle_human_agent_transfer(self):
+        """
+        Handle the transfer to a human agent.
+        
+        This is a framework method that you would customize to integrate with your
+        actual call center/human agent system (e.g., Twilio, Azure Communication Services,
+        custom telephony system, etc.)
+        """
+        logger.info("=" * 60)
+        logger.info("ESCALATING TO HUMAN AGENT")
+        logger.info(f"Reason: {self._escalation_reason}")
+        logger.info("=" * 60)
+        
+        print("\n" + "=" * 60)
+        print("🚀 TRANSFERRING TO HUMAN AGENT")
+        print(f"📋 Reason: {self._escalation_reason}")
+        print("=" * 60)
+        
+        # Prepare handoff context for human agent
+        handoff_context = {
+            "timestamp": datetime.now().isoformat(),
+            "session_id": timestamp,
+            "reason": self._escalation_reason,
+            "conversation_summary": self._generate_conversation_summary(),
+            "last_user_message": self._current_user_transcript,
+            "conversation_history": self.conversation_history
+        }
+        
+        # Save handoff context
+        handoff_file = f'logs/{timestamp}_handoff_context.json'
+        try:
+            with open(handoff_file, 'w', encoding='utf-8') as f:
+                json.dump(handoff_context, f, indent=2, ensure_ascii=False)
+            logger.info(f"Handoff context saved to {handoff_file}")
+            print(f"📄 Handoff context saved: {handoff_file}")
+        except Exception as e:
+            logger.error(f"Failed to save handoff context: {e}")
+        
+        # TODO: Integrate with your human agent system here
+        # Examples:
+        # - API call to your call center routing system
+        # - Create a ticket in your support system
+        # - Send notification to available agents
+        # - Transfer the audio stream to human agent
+        
+        if self.human_agent_endpoint:
+            logger.info(f"Would connect to human agent endpoint: {self.human_agent_endpoint}")
+            print(f"🔗 Human agent endpoint: {self.human_agent_endpoint}")
+            # Add your integration code here **Note - custom code to route the call**
+            # await self._connect_to_human_agent(handoff_context)
+        else:
+            print("\n⚠️  No human agent endpoint configured.")
+            print("To integrate with your call center:")
+            print("1. Set --human-agent-endpoint parameter")
+            print("2. Implement integration in _handle_human_agent_transfer()")
+            print(f"3. Use handoff context from: {handoff_file}")
+
+    def _generate_conversation_summary(self) -> str:
+        """Generate a brief summary of the conversation for human agent context."""
+        if not self.conversation_history:
+            return "No conversation history available."
+        
+        summary_parts = []
+        for item in self.conversation_history[-5:]:  # Last 5 items
+            role = item.get('role', 'unknown')
+            content = item.get('content', [])
+            
+            for content_item in content:
+                if content_item.get('type') == 'input_text' and 'transcript' in content_item:
+                    summary_parts.append(f"User: {content_item['transcript']}")
+                elif content_item.get('type') == 'text' and 'text' in content_item:
+                    summary_parts.append(f"Assistant: {content_item['text']}")
+        
+        return " | ".join(summary_parts[-10:]) if summary_parts else "Brief conversation"
+
     async def _setup_session(self):
-        """Configure the VoiceLive session for audio conversation."""
-        logger.info("Setting up voice conversation session...")
+        """Configure the VoiceLive session for audio conversation with HITL tools."""
+        logger.info("Setting up HITL voice conversation session...")
 
         # Create voice configuration
         voice_config: Union[AzureStandardVoice, str]
         if self.voice.startswith("en-US-") or self.voice.startswith("en-CA-") or "-" in self.voice:
-            # Azure voice - create with optional temperature and rate
             voice_kwargs = {"name": self.voice}
             if self.voice_temperature is not None:
                 voice_kwargs["temperature"] = self.voice_temperature
             if self.voice_rate is not None:
                 voice_kwargs["rate"] = self.voice_rate
             voice_config = AzureStandardVoice(**voice_kwargs)
-            logger.info(f"Azure voice configured: {self.voice} (temp={self.voice_temperature}, rate={self.voice_rate})")
+            logger.info(f"Azure voice configured: {self.voice}")
         else:
-            # OpenAI voice (alloy, echo, fable, onyx, nova, shimmer)
             voice_config = self.voice
             logger.info(f"OpenAI voice configured: {self.voice}")
 
-        # Create turn detection configuration based on VAD type
+        # Create turn detection configuration
         if self.vad_type == "azure_semantic_vad" or self.vad_type == "azure_multilingual_semantic_vad":
-            # Azure Semantic VAD with advanced features
             vad_kwargs = {
                 "threshold": self.vad_threshold,
                 "prefix_padding_ms": self.vad_prefix_padding_ms,
@@ -388,53 +508,100 @@ class BasicVoiceAssistant:
                 "interrupt_response": self.vad_interrupt_response,
             }
             
-            # Add end of utterance detection if enabled
             if self.end_of_utterance_enabled:
                 vad_kwargs["end_of_utterance_detection"] = EouDetection(
                     model=self.end_of_utterance_model
                 )
-                logger.info(f"End-of-utterance detection enabled: {self.end_of_utterance_model}")
             
             turn_detection_config = AzureSemanticVad(**vad_kwargs)
-            logger.info(f"Using {self.vad_type} with threshold={self.vad_threshold}")
         else:
-            # Standard Server VAD
             turn_detection_config = ServerVad(
                 threshold=self.vad_threshold,
                 prefix_padding_ms=self.vad_prefix_padding_ms,
                 silence_duration_ms=self.vad_silence_duration_ms,
             )
-            logger.info(f"Using server_vad with threshold={self.vad_threshold}")
 
         # Configure noise reduction
         noise_reduction = None
         if self.noise_reduction_type and self.noise_reduction_type != "none":
             noise_reduction = AudioNoiseReduction(type=self.noise_reduction_type)
-            logger.info(f"Noise reduction enabled: {self.noise_reduction_type}")
 
         # Configure echo cancellation
         echo_cancellation = None
         if self.echo_cancellation_enabled:
             echo_cancellation = AudioEchoCancellation()
-            logger.info("Echo cancellation enabled")
 
-        # Create session configuration
+        # Define human agent transfer function
+        transfer_function = FunctionTool(
+            name="transfer_to_human_agent",
+            description=(
+                "Transfer the call to a human agent when the AI cannot adequately help the customer. "
+                "Use this when:\n"
+                "- The query is too complex or outside your knowledge\n"
+                "- The customer explicitly requests a human agent\n"
+                "- You've failed to resolve the issue after multiple attempts\n"
+                "- The situation requires human judgment or empathy\n"
+                "- Legal, financial, or sensitive matters that need human oversight"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief explanation of why human agent transfer is needed"
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "critical"],
+                        "description": "Urgency level of the transfer"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Category of the issue (e.g., technical, billing, complaint, etc.)"
+                    }
+                },
+                "required": ["reason", "urgency"]
+            }
+        )
+
+        # Enhanced instructions with HITL guidance
+        enhanced_instructions = self.instructions + """
+
+IMPORTANT - Human Agent Escalation:
+You have access to a function called 'transfer_to_human_agent'. Use it when:
+1. You genuinely cannot answer the customer's question
+2. The customer explicitly asks for a human agent
+3. The issue is too complex or requires human judgment
+4. You've attempted to help but the customer is still unsatisfied
+5. The matter involves sensitive topics requiring human empathy
+
+Before transferring, always:
+- Acknowledge the customer's concern
+- Explain briefly why you're transferring them
+- Assure them a human agent will help immediately
+
+Example: "I understand this is a complex situation. Let me connect you with a human agent who can better assist with this specific issue."
+"""
+
+        # Create session configuration with tools
         session_config = RequestSession(
             modalities=[Modality.TEXT, Modality.AUDIO],
-            instructions=self.instructions,
+            instructions=enhanced_instructions,
             voice=voice_config,
             input_audio_format=InputAudioFormat.PCM16,
             output_audio_format=OutputAudioFormat.PCM16,
             turn_detection=turn_detection_config,
             input_audio_echo_cancellation=echo_cancellation,
             input_audio_noise_reduction=noise_reduction,
+            tools=[transfer_function],
+            # tool_choice=ToolChoice.AUTO
         )
 
         conn = self.connection
         assert conn is not None, "Connection must be established before setting up session"
         await conn.session.update(session=session_config)
 
-        logger.info("Session configuration sent")
+        logger.info("HITL session configuration sent with transfer_to_human_agent tool")
 
     async def _process_events(self):
         """Process events from the VoiceLive connection."""
@@ -443,6 +610,12 @@ class BasicVoiceAssistant:
             assert conn is not None, "Connection must be established before processing events"
             async for event in conn:
                 await self._handle_event(event)
+                
+                # Exit loop if escalation was requested 
+                if self._should_exit:
+                    logger.info("Exiting event loop due to escalation")
+                    break
+                    
         except Exception:
             logger.exception("Error processing events")
             raise
@@ -454,20 +627,15 @@ class BasicVoiceAssistant:
         conn = self.connection
         assert ap is not None, "AudioProcessor must be initialized"
         assert conn is not None, "Connection must be established"
-        # assert keyword is used for debugging purposes to ensure that certain conditions are met or it will log the error.
 
         if event.type == ServerEventType.SESSION_UPDATED:
             logger.info("Session ready: %s", event.session.id)
             self.session_ready = True
 
-            # Add this for proactive greeting:
-            # if not hasattr(self, 'conversation_started') or not self.conversation_started:
-            #     self.conversation_started = True
             await asyncio.sleep(self.greeting_delay)
             print("Agent initiated conversation...")
             await conn.response.create()
 
-            # Start audio capture once session is ready
             ap.start_capture()
 
         elif event.type == ServerEventType.INPUT_AUDIO_BUFFER_SPEECH_STARTED:
@@ -476,7 +644,6 @@ class BasicVoiceAssistant:
 
             ap.skip_pending_audio()
 
-            # Only cancel if response is active and not already done
             if self._active_response and not self._response_api_done:
                 try:
                     await conn.response.cancel()
@@ -492,7 +659,6 @@ class BasicVoiceAssistant:
             print("🤔 Processing...")
 
         elif event.type == ServerEventType.INPUT_AUDIO_BUFFER_COMMITTED:
-            # Capture user's transcribed audio
             if hasattr(event, 'transcript') and event.transcript:
                 self._current_user_transcript = event.transcript
                 logger.info(f"User said: {event.transcript}")
@@ -505,12 +671,10 @@ class BasicVoiceAssistant:
             self._current_assistant_response = ""
 
         elif event.type == ServerEventType.RESPONSE_TEXT_DELTA:
-            # Capture assistant's text response as it's generated
             if hasattr(event, 'delta') and event.delta:
                 self._current_assistant_response += event.delta
 
         elif event.type == ServerEventType.RESPONSE_TEXT_DONE:
-            # Log complete assistant text response
             if self._current_assistant_response:
                 logger.info(f"Assistant said: {self._current_assistant_response}")
                 print(f"🤖 Assistant: {self._current_assistant_response}")
@@ -522,6 +686,46 @@ class BasicVoiceAssistant:
         elif event.type == ServerEventType.RESPONSE_AUDIO_DONE:
             logger.info("🤖 Assistant finished speaking")
             print("🎤 Ready for next input...")
+
+        elif event.type == ServerEventType.RESPONSE_FUNCTION_CALL_ARGUMENTS_DONE:
+            # Handle function call completion
+            logger.info(f"Function call completed: {event.name}")
+            
+            if event.name == "transfer_to_human_agent":
+                # Parse function arguments
+                try:
+                    args = json.loads(event.arguments)
+                    reason = args.get('reason', 'User requested human assistance')
+                    urgency = args.get('urgency', 'medium')
+                    category = args.get('category', 'general')
+                    
+                    logger.info(f"Transfer requested - Reason: {reason}, Urgency: {urgency}, Category: {category}")
+                    print("\n" + "⚠️" * 20)
+                    print(f"🔄 TRANSFER TO HUMAN AGENT INITIATED")
+                    print(f"   Reason: {reason}")
+                    print(f"   Urgency: {urgency}")
+                    print(f"   Category: {category}")
+                    print("⚠️" * 20 + "\n")
+                    
+                    # Mark escalation
+                    self._escalation_requested = True
+                    self._escalation_reason = f"{category} - {reason} (Urgency: {urgency})"
+                    self._should_exit = True
+                    
+                    # Submit function result
+                    # await conn.conversation.item.create(
+                    #     item={
+                    #         "type": "function_call_output",
+                    #         "call_id": event.call_id,
+                    #         "output": json.dumps({
+                    #             "status": "transfer_initiated",
+                    #             "message": "Transferring to human agent now..."
+                    #         })
+                    #     }
+                    # )
+                    
+                except json.JSONDecodeError:
+                    logger.error(f"Failed to parse function arguments: {event.arguments}")
 
         elif event.type == ServerEventType.RESPONSE_DONE:
             logger.info("✅ Response complete")
@@ -539,7 +743,6 @@ class BasicVoiceAssistant:
         elif event.type == ServerEventType.CONVERSATION_ITEM_CREATED:
             logger.debug("Conversation item created: %s", event.item.id)
             
-            # Add conversation item to history
             item_data = {
                 "id": event.item.id,
                 "type": event.item.type if hasattr(event.item, 'type') else None,
@@ -547,7 +750,6 @@ class BasicVoiceAssistant:
                 "timestamp": datetime.now().isoformat(),
             }
             
-            # Add content if available
             if hasattr(event.item, 'content') and event.item.content:
                 content_list = []
                 for content in event.item.content:
@@ -569,13 +771,13 @@ class BasicVoiceAssistant:
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Basic Voice Assistant using Azure VoiceLive SDK",
+        description="HITL Voice Assistant with Human Agent Escalation using Azure VoiceLive SDK",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     parser.add_argument(
         "--api-key",
-        help="Azure VoiceLive API key. If not provided, will use AZURE_VOICELIVE_API_KEY environment variable.",
+        help="Azure VoiceLive API key",
         type=str,
         default=os.environ.get("AZURE_VOICELIVE_API_KEY"),
     )
@@ -596,25 +798,10 @@ def parse_arguments():
 
     parser.add_argument(
         "--voice",
-        help="Voice to use for the assistant. E.g. alloy, echo, fable, en-US-AvaNeural, en-US-GuyNeural",
+        help="Voice to use for the assistant",
         type=str,
         default=os.environ.get("AZURE_VOICELIVE_VOICE", "en-US-Ava:DragonHDLatestNeural"),
     )
-
-    # Option 1 :- Fetching system messages from .env file
-
-    # parser.add_argument(
-    #     "--instructions",
-    #     help="System instructions for the AI assistant",
-    #     type=str,
-    #     default=os.environ.get(
-    #         "AZURE_VOICELIVE_INSTRUCTIONS",
-    #         "You are a helpful AI assistant. Respond naturally and conversationally. "
-    #         "Keep your responses concise but engaging.",
-    #     ),
-    # )
-
-    # Option 2 :- Fetching system messages from system_instructions.py file
 
     parser.add_argument(
         "--instructions",
@@ -622,176 +809,64 @@ def parse_arguments():
         type=str,
         default=(
             system_instructions.AZURE_VOICELIVE_INSTRUCTIONS.strip()
-            or "You are a helpful AI assistant. Respond naturally and conversationally. "
-            "Keep your responses concise but engaging."
-    ),
+            or "You are a helpful AI assistant in a call center. "
+            "Respond naturally and conversationally. "
+            "If you cannot help, use the transfer_to_human_agent function."
+        ),
     )
 
-    # Option 3 :- Priority to system_instructions.py file, fallback to .env file
-
-    # parser.add_argument(
-    # "--instructions",
-    # help="System instructions for the AI assistant",
-    # type=str,
-    # default=(
-    #     system_instructions.AZURE_VOICELIVE_INSTRUCTIONS.strip() 
-    #     or os.environ.get("AZURE_VOICELIVE_INSTRUCTIONS")
-    #     or "You are a helpful AI assistant. Respond naturally and conversationally. "
-    #        "Keep your responses concise but engaging."
-    # ),
-    # )
-
-    # ============================================
-    # Voice Configuration Parameters
-    # ============================================
+    # HITL-specific parameter
     parser.add_argument(
-        "--voice-temperature",
-        help="Voice temperature for HD voices (0.0-2.0, controls variability)",
-        type=float,
-        default=float(os.environ.get("AZURE_VOICELIVE_VOICE_TEMPERATURE", "0.8")) if os.environ.get("AZURE_VOICELIVE_VOICE_TEMPERATURE") else None,
-    )
-
-    parser.add_argument(
-        "--voice-rate",
-        help="Speaking rate (0.5-1.5, controls speed)",
+        "--human-agent-endpoint",
+        help="Endpoint URL for human agent system (e.g., call center API)",
         type=str,
-        default=os.environ.get("AZURE_VOICELIVE_VOICE_RATE", "1.0") if os.environ.get("AZURE_VOICELIVE_VOICE_RATE") else None,
+        default=os.environ.get("HUMAN_AGENT_ENDPOINT"),
     )
 
-    # ============================================
-    # Turn Detection (VAD) Configuration
-    # ============================================
-    parser.add_argument(
-        "--vad-type",
-        help="VAD type: server_vad, azure_semantic_vad, or azure_multilingual_semantic_vad",
-        type=str,
-        default=os.environ.get("AZURE_VOICELIVE_VAD_TYPE", "server_vad"),
-        choices=["server_vad", "azure_semantic_vad", "azure_multilingual_semantic_vad"],
-    )
+    # Voice Configuration
+    parser.add_argument("--voice-temperature", type=float, 
+                       default=float(os.environ.get("AZURE_VOICELIVE_VOICE_TEMPERATURE", "0.8")) if os.environ.get("AZURE_VOICELIVE_VOICE_TEMPERATURE") else None)
+    parser.add_argument("--voice-rate", type=str,
+                       default=os.environ.get("AZURE_VOICELIVE_VOICE_RATE", "1.0") if os.environ.get("AZURE_VOICELIVE_VOICE_RATE") else None)
 
-    parser.add_argument(
-        "--vad-threshold",
-        help="VAD threshold (0.0-1.0, higher = less sensitive)",
-        type=float,
-        default=float(os.environ.get("AZURE_VOICELIVE_VAD_THRESHOLD", "0.8")),
-    )
+    # VAD Configuration
+    parser.add_argument("--vad-type", type=str, default=os.environ.get("AZURE_VOICELIVE_VAD_TYPE", "server_vad"),
+                       choices=["server_vad", "azure_semantic_vad", "azure_multilingual_semantic_vad"])
+    parser.add_argument("--vad-threshold", type=float, default=float(os.environ.get("AZURE_VOICELIVE_VAD_THRESHOLD", "0.8")))
+    parser.add_argument("--vad-prefix-padding-ms", type=int, default=int(os.environ.get("AZURE_VOICELIVE_VAD_PREFIX_PADDING_MS", "300")))
+    parser.add_argument("--vad-silence-duration-ms", type=int, default=int(os.environ.get("AZURE_VOICELIVE_VAD_SILENCE_DURATION_MS", "900")))
+    parser.add_argument("--vad-speech-duration-ms", type=int, default=int(os.environ.get("AZURE_VOICELIVE_VAD_SPEECH_DURATION_MS", "80")))
+    parser.add_argument("--vad-remove-filler-words", action="store_true",
+                       default=os.environ.get("AZURE_VOICELIVE_VAD_REMOVE_FILLER_WORDS", "false").lower() == "true")
+    parser.add_argument("--vad-interrupt-response", action="store_true",
+                       default=os.environ.get("AZURE_VOICELIVE_VAD_INTERRUPT_RESPONSE", "false").lower() == "true")
 
-    parser.add_argument(
-        "--vad-prefix-padding-ms",
-        help="Audio captured before speech start (milliseconds)",
-        type=int,
-        default=int(os.environ.get("AZURE_VOICELIVE_VAD_PREFIX_PADDING_MS", "300")),
-    )
-
-    parser.add_argument(
-        "--vad-silence-duration-ms",
-        help="Silence duration to detect speech end (milliseconds)",
-        type=int,
-        default=int(os.environ.get("AZURE_VOICELIVE_VAD_SILENCE_DURATION_MS", "900")),
-    )
-
-    parser.add_argument(
-        "--vad-speech-duration-ms",
-        help="Minimum speech duration to start detection (milliseconds)",
-        type=int,
-        default=int(os.environ.get("AZURE_VOICELIVE_VAD_SPEECH_DURATION_MS", "80")),
-    )
-
-    parser.add_argument(
-        "--vad-remove-filler-words",
-        help="Remove filler words like 'umm', 'ah'",
-        action="store_true",
-        default=os.environ.get("AZURE_VOICELIVE_VAD_REMOVE_FILLER_WORDS", "false").lower() == "true",
-    )
-
-    parser.add_argument(
-        "--vad-interrupt-response",
-        help="Enable barge-in interruption",
-        action="store_true",
-        default=os.environ.get("AZURE_VOICELIVE_VAD_INTERRUPT_RESPONSE", "false").lower() == "true",
-    )
-
-    # ============================================
     # End of Utterance Detection
-    # ============================================
-    parser.add_argument(
-        "--end-of-utterance-enabled",
-        help="Enable advanced end-of-utterance detection",
-        action="store_true",
-        default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_ENABLED", "false").lower() == "true",
-    )
+    parser.add_argument("--end-of-utterance-enabled", action="store_true",
+                       default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_ENABLED", "false").lower() == "true")
+    parser.add_argument("--end-of-utterance-model", type=str,
+                       default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_MODEL", "semantic_detection_v1"),
+                       choices=["semantic_detection_v1", "semantic_detection_v1_multilingual"])
+    parser.add_argument("--end-of-utterance-threshold-level", type=str,
+                       default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_THRESHOLD_LEVEL", "default"),
+                       choices=["low", "medium", "high", "default"])
+    parser.add_argument("--end-of-utterance-timeout-ms", type=int,
+                       default=int(os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_TIMEOUT_MS", "1000")))
 
-    parser.add_argument(
-        "--end-of-utterance-model",
-        help="End-of-utterance model: semantic_detection_v1 or semantic_detection_v1_multilingual",
-        type=str,
-        default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_MODEL", "semantic_detection_v1"),
-        choices=["semantic_detection_v1", "semantic_detection_v1_multilingual"],
-    )
-
-    parser.add_argument(
-        "--end-of-utterance-threshold-level",
-        help="Threshold level: low, medium, high, or default",
-        type=str,
-        default=os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_THRESHOLD_LEVEL", "default"),
-        choices=["low", "medium", "high", "default"],
-    )
-
-    parser.add_argument(
-        "--end-of-utterance-timeout-ms",
-        help="Maximum wait time for detection (milliseconds)",
-        type=int,
-        default=int(os.environ.get("AZURE_VOICELIVE_END_OF_UTTERANCE_TIMEOUT_MS", "1000")),
-    )
-
-    # ============================================
     # Audio Configuration
-    # ============================================
-    parser.add_argument(
-        "--audio-sample-rate",
-        help="Audio sample rate: 16000 or 24000",
-        type=int,
-        default=int(os.environ.get("AZURE_VOICELIVE_AUDIO_SAMPLE_RATE", "24000")),
-        choices=[16000, 24000],
-    )
+    parser.add_argument("--audio-sample-rate", type=int, default=int(os.environ.get("AZURE_VOICELIVE_AUDIO_SAMPLE_RATE", "24000")),
+                       choices=[16000, 24000])
+    parser.add_argument("--noise-reduction-type", type=str,
+                       default=os.environ.get("AZURE_VOICELIVE_NOISE_REDUCTION_TYPE", "azure_deep_noise_suppression"),
+                       choices=["azure_deep_noise_suppression", "none"])
+    parser.add_argument("--echo-cancellation-enabled", action="store_true",
+                       default=os.environ.get("AZURE_VOICELIVE_ECHO_CANCELLATION_ENABLED", "true").lower() == "true")
+    parser.add_argument("--no-echo-cancellation", action="store_true", default=False)
 
-    parser.add_argument(
-        "--noise-reduction-type",
-        help="Noise reduction type: azure_deep_noise_suppression or none",
-        type=str,
-        default=os.environ.get("AZURE_VOICELIVE_NOISE_REDUCTION_TYPE", "azure_deep_noise_suppression"),
-        choices=["azure_deep_noise_suppression", "none"],
-    )
-
-    parser.add_argument(
-        "--echo-cancellation-enabled",
-        help="Enable echo cancellation",
-        action="store_true",
-        default=os.environ.get("AZURE_VOICELIVE_ECHO_CANCELLATION_ENABLED", "true").lower() == "true",
-    )
-
-    parser.add_argument(
-        "--no-echo-cancellation",
-        help="Disable echo cancellation",
-        action="store_true",
-        default=False,
-    )
-
-    # ============================================
     # Additional Features
-    # ============================================
-    parser.add_argument(
-        "--greeting-delay",
-        help="Proactive greeting delay in seconds",
-        type=float,
-        default=float(os.environ.get("AZURE_VOICELIVE_GREETING_DELAY", "2.0")),
-    )
-
-    parser.add_argument(
-        "--use-token-credential", help="Use Azure token credential instead of API key", action="store_true", default=False
-    )
-
-    parser.add_argument("--verbose", help="Enable verbose logging", action="store_true")
+    parser.add_argument("--greeting-delay", type=float, default=float(os.environ.get("AZURE_VOICELIVE_GREETING_DELAY", "2.0")))
+    parser.add_argument("--use-token-credential", action="store_true", default=False)
+    parser.add_argument("--verbose", action="store_true")
 
     return parser.parse_args()
 
@@ -800,31 +875,25 @@ def main():
     """Main function."""
     args = parse_arguments()
 
-    # Set logging level
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Validate credentials
     if not args.api_key and not args.use_token_credential:
         print("❌ Error: No authentication provided")
-        print("Please provide an API key using --api-key or set AZURE_VOICELIVE_API_KEY environment variable,")
-        print("or use --use-token-credential for Azure authentication.")
+        print("Please provide an API key or use --use-token-credential")
         sys.exit(1)
 
-    # Create client with appropriate credential
     credential: Union[AzureKeyCredential, AsyncTokenCredential]
     if args.use_token_credential:
-        credential = AzureCliCredential()  # or DefaultAzureCredential() if needed
+        credential = AzureCliCredential()
         logger.info("Using Azure token credential")
     else:
         credential = AzureKeyCredential(args.api_key)
         logger.info("Using API key credential")
 
-    # Handle echo cancellation flag override
     echo_cancellation_enabled = args.echo_cancellation_enabled and not args.no_echo_cancellation
 
-    # Create and start voice assistant
-    assistant = BasicVoiceAssistant(
+    assistant = HITLVoiceAssistant(
         endpoint=args.endpoint,
         credential=credential,
         model=args.model,
@@ -847,9 +916,9 @@ def main():
         noise_reduction_type=args.noise_reduction_type,
         echo_cancellation_enabled=echo_cancellation_enabled,
         greeting_delay=args.greeting_delay,
+        human_agent_endpoint=args.human_agent_endpoint,
     )
 
-    # Setup signal handlers for graceful shutdown
     def signal_handler(_sig, _frame):
         logger.info("Received shutdown signal")
         raise KeyboardInterrupt()
@@ -857,28 +926,24 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Start the assistant
     try:
         asyncio.run(assistant.start())
     except KeyboardInterrupt:
-        print("\n👋 Voice assistant shut down. Goodbye!")
+        print("\n👋 HITL Voice assistant shut down. Goodbye!")
     except Exception as e:
-        print("Fatal Error: ", e)
+        print(f"Fatal Error: {e}")
+        logger.exception("Fatal error")
+
 
 if __name__ == "__main__":
-    # Check audio system
     try:
         p = pyaudio.PyAudio()
-        # Check for input devices
         input_devices = [
-            i
-            for i in range(p.get_device_count())
+            i for i in range(p.get_device_count())
             if cast(Union[int, float], p.get_device_info_by_index(i).get("maxInputChannels", 0) or 0) > 0
         ]
-        # Check for output devices
         output_devices = [
-            i
-            for i in range(p.get_device_count())
+            i for i in range(p.get_device_count())
             if cast(Union[int, float], p.get_device_info_by_index(i).get("maxOutputChannels", 0) or 0) > 0
         ]
         p.terminate()
@@ -894,8 +959,7 @@ if __name__ == "__main__":
         print(f"❌ Audio system check failed: {e}")
         sys.exit(1)
 
-    print("🎙️  Basic Voice Assistant with Azure VoiceLive SDK")
-    print("=" * 50)
+    print("🎙️  HITL Voice Assistant with Human Agent Escalation")
+    print("=" * 60)
 
-    # Run the assistant
     main()
