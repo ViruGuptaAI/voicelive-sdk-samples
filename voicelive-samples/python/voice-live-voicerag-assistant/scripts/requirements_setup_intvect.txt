@@ -1,0 +1,5 @@
+azure-identity
+azure-search-documents
+azure-storage-blob
+python-dotenv
+rich
