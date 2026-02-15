@@ -2,7 +2,7 @@
 
 [SDK Reference documentation](https://learn.microsoft.com/python/api/overview/azure/ai-voicelive-readme) | [Package (PyPI)](https://pypi.org/project/azure-ai-voicelive/)
 
-This folder contains Python samples demonstrating how to build real-time voice assistants using Azure AI Speech VoiceLive service. Each sample is a standalone Python script showcasing different capabilities.
+This folder contains Python samples demonstrating how to build real-time voice assistants using Azure AI Speech VoiceLive service. Each sample is self-contained for easy understanding and deployment.
 
 ## Available Samples
 
@@ -46,6 +46,17 @@ Demonstrates how to implement function calling with VoiceLive models, enabling t
 - Function result handling
 - Advanced tool integration
 - Proactive greeting support
+
+### [RAG-enabled Voice Assistant](./voice-live-voicerag-assistant/README.md)
+
+Demonstrates how to build a real-time voice assistant with Retrieval-Augmented Generation (RAG) capabilities using Azure AI Voice Live API and Azure AI Search.
+
+**Key Features:**
+- Real-time speech-to-speech interaction powered by Voice live
+- RAG integration with Azure AI Search for document retrieval
+- Full-stack architecture (React/TypeScript frontend + FastAPI backend)
+- Azure AI Foundry Agent Service integration
+- Production-ready `azd` deployment to Azure Container Apps
 
 ## Prerequisites
 

@@ -1,6 +1,8 @@
 # Java Voice Assistant Samples
 
-This folder contains Java samples demonstrating how to build real-time voice assistants using Azure AI Speech VoiceLive service. Each sample is self-contained with all code in a single Java file for easy understanding and deployment.
+[Reference documentation](/java/api/overview/azure/ai-voicelive-readme) | [Package (Maven)](https://central.sonatype.com/artifact/com.azure/azure-ai-voicelive/overview)
+
+This folder contains Java samples demonstrating how to build real-time voice assistants using Azure AI Speech VoiceLive service. Each sample is self-contained for easy understanding and deployment.
 
 ## Available Samples
 

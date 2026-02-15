@@ -2,7 +2,7 @@
 
 [SDK Reference documentation](https://learn.microsoft.com/dotnet/api/overview/azure/ai.voicelive-readme) | [Package (NuGet)](https://www.nuget.org/packages/Azure.AI.VoiceLive)
 
-This folder contains C# samples demonstrating how to build real-time voice assistants using Azure AI Speech VoiceLive service. Each sample is self-contained with all code in a single `Program.cs` file for easy understanding and deployment.
+This folder contains C# samples demonstrating how to build real-time voice assistants using Azure AI Speech VoiceLive service. Each sample is self-contained for easy understanding and deployment.
 
 ## Available Samples
 

@@ -58,10 +58,17 @@ Python samples showcasing:
 - **Model Quickstart**: Direct model access with flexible authentication
 - **Bring-Your-Own-Model (BYOM) Quickstart**: Use your own models hosted in Foundry with proactive greetings
 - **Function Calling**: Advanced tool integration with custom functions and proactive greetings
+- **RAG-enabled Voice Assistant**: Full-stack voice assistant with Azure AI Search integration and `azd` deployment
 - Built with Python 3.8+ and async/await patterns
 
 ### [JavaScript Samples](./javascript/)
-JavaScript/TypeScript samples (coming soon)
+JavaScript/TypeScript samples showcasing:
+- **Basic Web Voice Assistant**: Browser-based voice assistant with real-time streaming and barge-in support
+- **Voice Live Avatar**: Avatar-enabled voice conversations with Docker deployment
+- **Voice Live Car Demo**: Voice-Enabled Car Assistant powered by multiple architectures
+- **Voice Live Interpreter**: Real-time speech translation, speech in and speech out
+- **Voice Live Trader**: Real-time trading assistant for stock fund crypto FX trading app
+- Built with TypeScript and Web Audio API
 
 ### [Java Samples](./java/)
 Java samples  showcasing:
