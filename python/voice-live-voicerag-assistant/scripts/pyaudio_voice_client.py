@@ -1,0 +1,88 @@
+from azure.core.credentials import AzureKeyCredential, TokenCredential
+import os
+from dotenv import load_dotenv
+import sys
+import signal
+import logging
+import asyncio
+
+# Add project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Own modules
+from handler import AsyncFunctionCallingClient
+import app.backend.utilities as utils
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+load_dotenv(override=True)
+
+api_key = os.getenv("AZURE_VOICELIVE_API_KEY")
+endpoint = os.getenv("AZURE_VOICELIVE_ENDPOINT")
+model = "gpt-realtime"  # os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+voice = "en-US-Ava:DragonHDLatestNeural"
+credential = AzureKeyCredential(api_key)
+
+instructions = utils.load_instructions("instructions.txt")
+
+tools = [
+    {
+        "type": "function",
+        "name": "get_user_information",
+        "description": "Search the knowledge base user credit card due date and amount",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query string"}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_product_information",
+        "description": "Search the knowledge base for relevant product information.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query string"}
+            },
+            "required": ["query"],
+        },
+    },
+]
+
+
+async def main():
+    """Main async function."""
+    # Create and run the client
+    client = AsyncFunctionCallingClient(
+        endpoint=endpoint,
+        credential=credential,
+        model=model,
+        voice=voice,
+        instructions=instructions,
+        tools=tools,
+    )
+
+    # Setup signal handlers for graceful shutdown
+    def signal_handler(sig, frame):
+        logger.info("Received shutdown signal")
+        client.audio_processor.cleanup()
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        await client.run()
+    except KeyboardInterrupt:
+        print("\n👋 Voice Live function calling client shut down.")
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
