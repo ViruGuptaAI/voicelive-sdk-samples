@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # Environment variable loading
-load_dotenv('./.env', override=True)
+load_dotenv( override=True)
 
 # Set up logging
 ## Add folder for logging
@@ -239,12 +239,12 @@ class AudioProcessor:
         logger.info("Audio processor cleaned up")
 
 class BasicVoiceAssistant:
-    """Basic voice assistant implementing the VoiceLive SDK patterns."""
+    """Basic voice assistant implementing the VoiceLive SDK patterns"""
 
     def __init__(
         self,
         endpoint: str,
-        credential: Union[AzureKeyCredential, AsyncTokenCredential],
+        credential: Union[AzureKeyCredential, AsyncTokenCredential, DefaultAzureCredential],
         model: str,
         voice: str,
         instructions: str,
@@ -511,9 +511,10 @@ def main():
         sys.exit(1)
 
     # Create client with appropriate credential
-    credential: Union[AzureKeyCredential, AsyncTokenCredential]
+    credential: Union[AzureKeyCredential, AsyncTokenCredential, DefaultAzureCredential]
     if args.use_token_credential:
-        credential = AzureCliCredential()  # or DefaultAzureCredential() if needed
+        # credential = AzureCliCredential()  # or DefaultAzureCredential() if needed
+        credential = DefaultAzureCredential()
         logger.info("Using Azure token credential")
     else:
         credential = AzureKeyCredential(args.api_key)
