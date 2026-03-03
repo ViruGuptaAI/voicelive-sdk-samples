@@ -654,6 +654,21 @@ class BasicVoiceAssistant:
                 logger.error("❌ VoiceLive error: %s", msg)
                 print(f"Error: {msg}")
 
+        elif event.type == ServerEventType.CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_COMPLETED:
+            # User input transcription arrives in this dedicated event (NOT in CONVERSATION_ITEM_CREATED)
+            transcript = getattr(event, "transcript", "") or ""
+            if transcript.strip():
+                user_text = transcript.strip()
+                logger.info(f"User said: {user_text}")
+                print(f"👤 You: {user_text}")
+                
+                # Add to transcript log
+                self._transcript_log.append({
+                    "role": "user",
+                    "text": user_text,
+                    "timestamp": datetime.now().isoformat()
+                })
+
         elif event.type == ServerEventType.CONVERSATION_ITEM_CREATED:
             logger.debug("Conversation item created: %s", event.item.id)
             
@@ -676,22 +691,6 @@ class BasicVoiceAssistant:
                         content_item["transcript"] = content.transcript
                     content_list.append(content_item)
                 item_data["content"] = content_list
-                
-                # Capture USER transcript from conversation item
-                if event.item.role == "user":
-                    for content in event.item.content:
-                        if hasattr(content, 'transcript') and content.transcript:
-                            user_text = content.transcript
-                            logger.info(f"User said: {user_text}")
-                            print(f"👤 You: {user_text}")
-                            
-                            # Add to transcript log
-                            self._transcript_log.append({
-                                "role": "user",
-                                "text": user_text,
-                                "timestamp": datetime.now().isoformat()
-                            })
-                            break
             
             self.conversation_history.append(item_data)
             logger.info(f"Conversation item logged: {item_data.get('role')} - {item_data.get('id')}")

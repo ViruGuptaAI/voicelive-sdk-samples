@@ -465,7 +465,6 @@ def parse_arguments():
         type=str,
         choices=["byom-azure-openai-realtime", "byom-azure-openai-chat-completion"],
         default=os.environ.get("AZURE_VOICELIVE_BYOM_MODE", "byom-azure-openai-chat-completion"),
-
     )
 
     parser.add_argument(
@@ -487,7 +486,7 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--use-token-credential", help="Use Azure token credential instead of API key", action="store_true", default=False
+        "--use-token-credential", help="Use Azure token credential instead of API key", action="store_true", default=True
     )
 
     parser.add_argument("--verbose", help="Enable verbose logging", action="store_true")

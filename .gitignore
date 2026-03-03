@@ -454,3 +454,4 @@ application.properties
 # JavaScript files
 package-lock.json
 node_modules/
+voicelive-samples/Realtime/system_instructions.py
