@@ -40,8 +40,12 @@ from dotenv import load_dotenv
 # Change to the directory where this script is located
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-# Load environment variables
-load_dotenv(override=True)
+# Load environment variables from shared .env
+_shared_env = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "python", "voice-live-quickstarts", ".env"
+)
+load_dotenv(os.path.normpath(_shared_env), override=True)
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -217,12 +221,7 @@ class RealtimeVoiceAssistant:
         api_version: str = "2025-04-01-preview",
         api_key: Optional[str] = None,
         voice: str = "alloy",
-        instructions: str = (
-            "You are a helpful AI assistant. Always respond in English. "
-            "Respond naturally and conversationally. "
-            "Keep responses concise but engaging. "
-            "If you hear silence or unclear audio, ask the user to repeat."
-        ),
+        instructions: str = system_instructions.KOTAK_BOT,
         sample_rate: int = 24000,
         temperature: float = 0.8,
     ):
@@ -280,10 +279,31 @@ class RealtimeVoiceAssistant:
                 print("🔐 Using Azure Identity (Entra ID) authentication...")
 
             logger.info("Connecting to Realtime API – deployment: %s", self.deployment)
+            print(f"📡 Endpoint   : {self.endpoint}")
+            print(f"📦 Deployment : {self.deployment}")
+            print(f"📋 API Version: {self.api_version}")
 
-            async with client.beta.realtime.connect(
-                model=self.deployment,
-            ) as conn:
+            try:
+                conn_ctx = client.beta.realtime.connect(
+                    model=self.deployment,
+                )
+                conn = await conn_ctx.__aenter__()
+            except Exception as conn_err:
+                # Surface the full error details for HTTP 400 / connection failures
+                err_msg = str(conn_err)
+                logger.error("WebSocket connection failed: %s", err_msg)
+                print(f"\n❌ Connection failed: {err_msg}")
+                if hasattr(conn_err, "response"):
+                    resp = conn_err.response
+                    print(f"   HTTP Status : {getattr(resp, 'status_code', 'N/A')}")
+                    body = getattr(resp, "text", None) or getattr(resp, "content", None)
+                    if body:
+                        print(f"   Response    : {body}")
+                if hasattr(conn_err, "body"):
+                    print(f"   Body        : {conn_err.body}")
+                raise
+
+            try:
                 self._connection = conn
 
                 # Build send-audio helper for AudioProcessor
@@ -314,6 +334,8 @@ class RealtimeVoiceAssistant:
 
                 # Main event loop (mic capture starts after greeting completes)
                 await self._event_loop()
+            finally:
+                await conn_ctx.__aexit__(None, None, None)
 
         finally:
             self._save_session_data()
@@ -527,7 +549,7 @@ def parse_args():
     parser.add_argument(
         "--deployment",
         type=str,
-        default=os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-realtime-preview"),
+        default=os.environ.get("AZURE_OPENAI_RT_DEPLOYMENT", "gpt-4o-realtime-preview"),
         help="Model deployment name",
     )
     parser.add_argument(
@@ -545,8 +567,8 @@ def parse_args():
     parser.add_argument(
         "--voice",
         type=str,
-        default=os.environ.get("AZURE_OPENAI_VOICE", "alloy"),
-        help="Voice: alloy, echo, fable, onyx, nova, shimmer",
+        default=os.environ.get("OPENAI_VOICE", "alloy"),
+        help="Voice: alloy, echo, fable, onyx, nova, shimmer, marin, etc.",
     )
     parser.add_argument(
         "--instructions",
@@ -563,7 +585,7 @@ def parse_args():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=float(os.environ.get("AZURE_OPENAI_TEMPERATURE", "0.8")),
+        default=float(os.environ.get("AZURE_OPENAI_RT_TEMPERATURE", "0.8")),
         help="Model temperature (0.0 – 2.0)",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
