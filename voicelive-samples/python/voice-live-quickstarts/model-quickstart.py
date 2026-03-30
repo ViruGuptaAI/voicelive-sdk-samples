@@ -754,7 +754,8 @@ def parse_arguments():
         help="System instructions for the AI assistant",
         type=str,
         default=(
-            system_instructions.AZURE_VOICELIVE_INSTRUCTIONS_FOR_INDIALIFE_INSURANCE.strip()
+            # system_instructions.AZURE_VOICELIVE_INSTRUCTIONS_FOR_INDIALIFE_INSURANCE.strip()
+            system_instructions.Translator_SM_HI_MR.strip()
             or "You are a helpful AI assistant. Respond naturally and conversationally. "
             "Keep your responses concise but engaging."
     ),
